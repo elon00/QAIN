@@ -1,0 +1,653 @@
+Phase 4: React Frontend
+Goal: Build a web application using React and Vite that allows users to interact with your deployed smart contracts, view their status, and potentially trigger off-chain operations.
+
+Deliverables:
+
+A React project initialized with Vite.
+Components for:
+Connecting to a wallet (e.g., MetaMask).
+Displaying QAIN Token balance.
+Submitting AI proof hashes.
+Claiming rewards.
+Viewing status of submitted proofs and received rewards.
+Basic styling.
+Step 1: Project Setup (Vite + React)
+
+Ensure you are in the root directory of your qain-project.
+
+# From the root of your qain-project directory
+npm create vite@latest frontend --template react
+cd frontend
+Follow the prompts:
+
+Project name: frontend
+Select a framework: React
+Select a variant: JavaScript (or TypeScript if you prefer, but we'll stick to JS for now)
+Now, install dependencies:
+
+cd frontend
+npm install
+npm install --save ethers @reduxjs/toolkit react-redux
+ethers: To interact with smart contracts from the frontend.
+@reduxjs/toolkit, react-redux: For state management (highly recommended for dApps).
+Step 2: Environment Variables (.env)
+
+Create a .env file in the frontend directory for storing crucial configuration like contract addresses and RPC URLs.
+
+# frontend/.env
+
+# Network Configuration (e.g., Sepolia)
+VITE_RPC_URL=YOUR_SEPOLIA_RPC_URL # Your Sepolia RPC URL
+
+# Smart Contract Addresses (Deployed from Phase 1)
+VITE_QAIN_TOKEN_ADDRESS=YOUR_QAIN_TOKEN_ADDRESS
+VITE_PROOF_OF_AI_ADDRESS=YOUR_PROOF_OF_AI_ADDRESS
+VITE_REWARDER_ADDRESS=YOUR_REWARDER_ADDRESS
+VITE_QUANTUM_ORACLE_ADDRESS=YOUR_QUANTUM_ORACLE_ADDRESS
+
+# For interacting with your Python service directly (optional, if frontend calls it)
+# VITE_PYTHON_SERVICE_URL=http://your-python-service-ip:5000
+Note: Vite uses VITE_ prefix for environment variables that are exposed to the client-side code.
+
+Step 3: Configure Ethers and Wallet Connection
+
+We'll set up a context or a Redux slice to manage the Ethereum provider, signer, and connected account. For simplicity, let's use a basic React context for wallet connection.
+
+Create a file src/contexts/Web3Context.jsx:
+
+// frontend/src/contexts/Web3Context.jsx
+import React, { createContext, useState, useContext, useEffect, useMemo } from 'react';
+import { ethers } from 'ethers';
+
+const Web3Context = createContext();
+
+export const useWeb3 = () => useContext(Web3Context);
+
+export const Web3Provider = ({ children }) => {
+    const [provider, setProvider] = useState(null);
+    const [signer, setSigner] = useState(null);
+    const [account, setAccount] = useState(null);
+    const [contractInstances, setContractInstances] = useState({});
+    const [error, setError] = useState(null);
+
+    const RPC_URL = import.meta.env.VITE_RPC_URL;
+
+    // Contract ABIs (copy these from your Hardhat artifacts or define them here)
+    // For example, you'll need the ERC20 ABI for QAINToken and ABIs for your other contracts.
+    // In a real project, you'd fetch these from a separate config file or build artifacts.
+    const ERC20_ABI = [
+        "function name() view returns (string)",
+        "function symbol() view returns (string)",
+        "function decimals() view returns (uint8)",
+        "function balanceOf(address account) view returns (uint256)",
+        "function transfer(address to, uint256 amount) returns (bool)",
+        "function approve(address spender, uint256 amount) returns (bool)"
+    ];
+
+    const PROOF_OF_AI_ABI = [
+        "function submitProof(bytes32 _metadataHash, bytes32 _outputHash) public",
+        "function proofs(uint256 _proofId) view returns (address submitter, uint256 timestamp, bytes32 metadataHash, bytes32 outputHash, bool isValid)",
+        "function getValidProofCountForUser(address _user) view returns (uint256)",
+        "event ProofSubmitted(uint256 indexed proofId, address indexed submitter, bytes32 metadataHash, bytes32 outputHash)",
+        "event ProofVerified(uint256 indexed proofId, address indexed verifier, bytes32 metadataHash, bytes32 outputHash)"
+    ];
+
+    const REWARDER_ABI = [
+        "function qainToken() view returns (address)",
+        "function proofOfAIContract() view returns (address)",
+        "function hasClaimedReward(address user) view returns (bool)",
+        "function claimReward()",
+        "event RewardDistributed(address indexed user, uint256 amount)",
+        "event TokensDeposited(address indexed depositor, uint256 amount)"
+    ];
+
+    const QUANTUM_ORACLE_ABI = [
+        "function latestRandomNumber() view returns (uint256)",
+        "function setRandomNumber(uint256 _randomNumber)",
+        "event RandomNumberUpdated(uint256 randomNumber, uint256 timestamp)"
+    ];
+
+    const QAIN_TOKEN_ADDRESS = import.meta.env.VITE_QAIN_TOKEN_ADDRESS;
+    const PROOF_OF_AI_ADDRESS = import.meta.env.VITE_PROOF_OF_AI_ADDRESS;
+    const REWARDER_ADDRESS = import.meta.env.VITE_REWARDER_ADDRESS;
+    const QUANTUM_ORACLE_ADDRESS = import.meta.env.VITE_QUANTUM_ORACLE_ADDRESS;
+
+    // Function to initialize contracts
+    const initializeContractInstances = (currentSigner, currentProvider) => {
+        if (!currentSigner || !currentProvider) return;
+
+        const instances = {
+            qainToken: new ethers.Contract(QAIN_TOKEN_ADDRESS, ERC20_ABI, currentSigner),
+            proofOfAI: new ethers.Contract(PROOF_OF_AI_ADDRESS, PROOF_OF_AI_ABI, currentSigner),
+            rewarder: new ethers.Contract(REWARDER_ADDRESS, REWARDER_ABI, currentSigner),
+            quantumOracle: new ethers.Contract(QUANTUM_ORACLE_ADDRESS, QUANTUM_ORACLE_ABI, currentSigner),
+        };
+        setContractInstances(instances);
+    };
+
+    // Connect to MetaMask
+    const connectWallet = async () => {
+        setError(null);
+        if (window.ethereum) {
+            try {
+                const ethProvider = new ethers.providers.Web3Provider(window.ethereum);
+                setProvider(ethProvider);
+
+                await window.ethereum.request({ method: 'eth_requestAccounts' });
+                const signerObj = ethProvider.getSigner();
+                setSigner(signerObj);
+                const acc = await signerObj.getAddress();
+                setAccount(acc);
+
+                initializeContractInstances(signerObj, ethProvider);
+
+                // Handle account changes and network changes
+                window.ethereum.on('accountsChanged', (accounts) => {
+                    if (accounts.length > 0) {
+                        setAccount(accounts[0]);
+                        // Re-initialize signer and contract instances with new account
+                        const newSigner = ethProvider.getSigner(accounts[0]);
+                        setSigner(newSigner);
+                        initializeContractInstances(newSigner, ethProvider);
+                    } else {
+                        setAccount(null);
+                        setSigner(null);
+                        setContractInstances({});
+                        setError("Please connect your wallet.");
+                    }
+                });
+
+                window.ethereum.on('chainChanged', (chainId) => {
+                    // Reload the page to switch networks correctly
+                    window.location.reload();
+                });
+
+            } catch (err) {
+                console.error("Error connecting wallet:", err);
+                setError(err.message || "Failed to connect wallet. Please ensure MetaMask is installed and unlocked.");
+            }
+        } else {
+            setError("MetaMask not detected. Please install MetaMask.");
+        }
+    };
+
+    // Disconnect wallet (optional)
+    const disconnectWallet = () => {
+        setAccount(null);
+        setSigner(null);
+        setProvider(null);
+        setContractInstances({});
+        setError(null);
+        // Potentially request logout from MetaMask if available
+    };
+
+    // Initial setup on component mount (if wallet is already connected)
+    useEffect(() => {
+        const initializeOnLoad = async () => {
+            if (window.ethereum && window.ethereum.selectedAddress) {
+                try {
+                    const ethProvider = new ethers.providers.Web3Provider(window.ethereum);
+                    setProvider(ethProvider);
+                    const signerObj = ethProvider.getSigner();
+                    setSigner(signerObj);
+                    const acc = await signerObj.getAddress();
+                    setAccount(acc);
+                    initializeContractInstances(signerObj, ethProvider);
+                } catch (err) {
+                    console.error("Error initializing on load:", err);
+                    setError(err.message || "Failed to initialize wallet connection.");
+                }
+            }
+        };
+        initializeOnLoad();
+    }, []);
+
+    const value = {
+        provider,
+        signer,
+        account,
+        contractInstances,
+        connectWallet,
+        disconnectWallet,
+        error,
+        setError
+    };
+
+    return (
+        <Web3Context.Provider value={value}>
+            {children}
+        </Web3Context.Provider>
+    );
+};
+Step 4: Update src/main.jsx
+
+Wrap your main App component with the Web3Provider.
+
+// frontend/src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import { Web3Provider } from './contexts/Web3Context'; // Import the provider
+import './index.css'; // Or your main CSS file
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <Web3Provider> {/* Wrap App with Web3Provider */}
+      <App />
+    </Web3Provider>
+  </React.StrictMode>,
+);
+Step 5: Create Components
+
+Let's create some basic components for interacting with the contracts.
+
+src/components/WalletConnector.jsx
+
+// frontend/src/components/WalletConnector.jsx
+import React from 'react';
+import { useWeb3 } from '../contexts/Web3Context';
+
+function WalletConnector() {
+    const { account, connectWallet, disconnectWallet, error } = useWeb3();
+
+    return (
+        <div>
+            {account ? (
+                <>
+                    <p>Connected: {account.substring(0, 6)}...{account.substring(account.length - 4)}</p>
+                    <button onClick={disconnectWallet}>Disconnect</button>
+                </>
+            ) : (
+                <button onClick={connectWallet}>Connect Wallet</button>
+            )}
+            {error && <p style={{ color: 'red' }}>{error}</p>}
+        </div>
+    );
+}
+
+export default WalletConnector;
+src/components/QainBalance.jsx
+
+// frontend/src/components/QainBalance.jsx
+import React, { useState, useEffect } from 'react';
+import { useWeb3 } from '../contexts/Web3Context';
+import { ethers } from 'ethers';
+
+function QainBalance() {
+    const { account, contractInstances, error: web3Error } = useWeb3();
+    const [balance, setBalance] = useState(null);
+    const [qainSymbol, setQainSymbol] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+        const fetchBalance = async () => {
+            if (!account || !contractInstances.qainToken) return;
+
+            setLoading(true);
+            setError(null);
+            try {
+                const tokenContract = contractInstances.qainToken;
+                const userBalance = await tokenContract.balanceOf(account);
+                const symbol = await tokenContract.symbol();
+                const decimals = await tokenContract.decimals();
+
+                setQainSymbol(symbol);
+                setBalance(ethers.utils.formatUnits(userBalance, decimals));
+            } catch (err) {
+                console.error("Error fetching QAIN balance:", err);
+                setError("Failed to fetch QAIN balance. Is the token contract address correct?");
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchBalance();
+    }, [account, contractInstances.qainToken, web3Error]); // Re-fetch if account or contract changes
+
+    return (
+        <div>
+            {loading ? (
+                <p>Loading balance...</p>
+            ) : error ? (
+                <p style={{ color: 'red' }}>{error}</p>
+            ) : balance !== null ? (
+                <p>Balance: {balance} {qainSymbol}</p>
+            ) : (
+                <p>Connect your wallet to see your balance.</p>
+            )}
+        </div>
+    );
+}
+
+export default QainBalance;
+src/components/SubmitProof.jsx
+
+// frontend/src/components/SubmitProof.jsx
+import React, { useState } from 'react';
+import { useWeb3 } from '../contexts/Web3Context';
+import { ethers } from 'ethers';
+
+// Helper to convert string to bytes32
+const toBytes32 = (str) => {
+    if (!str) return ethers.constants.HashZero;
+    // Ensure the string is converted to bytes and then hashed
+    // For simplicity, we'll hash the string representation.
+    // A real scenario might hash specific serialized data.
+    return ethers.utils.formatBytes32String(str.substring(0, 66)); // Truncate if too long for bytes32 representation
+};
+
+
+function SubmitProof() {
+    const { account, contractInstances, error: web3Error } = useWeb3();
+    const [metadataHashInput, setMetadataHashInput] = useState('');
+    const [outputHashInput, setOutputHashInput] = useState('');
+    const [submitting, setSubmitting] = useState(false);
+    const [submissionResult, setSubmissionResult] = useState(null);
+    const [error, setError] = useState(null);
+
+    const handleMetadataChange = (e) => {
+        setMetadataHashInput(e.target.value);
+        setSubmissionResult(null); // Clear previous results on input change
+        setError(null);
+    };
+
+    const handleOutputChange = (e) => {
+        setOutputHashInput(e.target.value);
+        setSubmissionResult(null);
+        setError(null);
+    };
+
+    const handleSubmit = async () => {
+        if (!account || !contractInstances.proofOfAI) {
+            setError("Please connect your wallet.");
+            return;
+        }
+        if (!metadataHashInput || !outputHashInput) {
+            setError("Please provide both metadata hash and output hash.");
+            return;
+        }
+
+        // Basic validation: check if inputs look like hashes (e.g., 0x...)
+        if (!metadataHashInput.startsWith('0x') || !outputHashInput.startsWith('0x')) {
+            setError("Hashes should start with '0x'.");
+            return;
+        }
+
+        setSubmitting(true);
+        setError(null);
+        setSubmissionResult(null);
+
+        try {
+            const metadataBytes32 = ethers.utils.formatBytes32String(metadataHashInput); // Using formatBytes32String might be tricky if the input is already a hash
+            const outputBytes32 = ethers.utils.formatBytes32String(outputHashInput);
+
+            // If your hashes are already 0x prefixed and of correct length (e.g. 64 hex chars for 32 bytes)
+            // you can directly use ethers.utils.hexDataSlice or similar, or just pass them if the contract expects string.
+            // The contract `ProofOfAI` expects `bytes32`, which is fixed 32 bytes.
+            // If your hashes are longer strings, you'll need to hash them first (e.g., with keccak256) or adjust storage.
+            // For now, let's assume the user inputs a valid 32-byte representation, or we hash them.
+
+            // Let's assume the user inputs the 0x prefixed hash strings.
+            // We need to ensure they are valid bytes32.
+            // A robust way is to hash the input string to get the bytes32.
+            // const metadataHashBytes32 = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(metadataHashInput));
+            // const outputHashBytes32 = ethers.utils.keccak256(ethers.utils.toUtf8Bytes(outputHashInput));
+
+            // Simpler approach: Assume inputs are already 32-byte hashes and just pass them if the contract expects bytes32.
+            // ethers.js handles the conversion from string to bytes32 if it's a valid representation.
+            // If the user provides a standard keccak256 hash (66 chars, starting with 0x), ethers.js should handle it.
+            const metadata32 = ethers.utils.isHexString(metadataHashInput) ? ethers.utils.arrayify(metadataHashInput) : ethers.utils.toUtf8Bytes(metadataHashInput);
+            const output32 = ethers.utils.isHexString(outputHashInput) ? ethers.utils.arrayify(outputHashInput) : ethers.utils.toUtf8Bytes(outputHashInput);
+
+
+            // Check if inputs are valid bytes32 length (32 bytes = 64 hex chars)
+            if ((metadata32.length !== 32) || (output32.length !== 32)) {
+                 setError("Metadata and Output hashes must be 32 bytes (64 hexadecimal characters).");
+                 setSubmitting(false);
+                 return;
+            }
+
+            const tx = await contractInstances.proofOfAI.submitProof(
+                ethers.utils.hexlify(metadata32), // Ensure it's hexlify for contract calls
+                ethers.utils.hexlify(output32)
+            );
+
+            setSubmissionResult("Submitting proof...");
+            const receipt = await tx.wait();
+            console.log("Proof submission receipt:", receipt);
+
+            if (receipt.status === 1) {
+                setSubmissionResult(`Proof submitted successfully! Transaction hash: ${tx.hash}`);
+            } else {
+                setError(`Proof submission failed. Transaction status: ${receipt.status}`);
+            }
+        } catch (err) {
+            console.error("Error submitting proof:", err);
+            setError(`Failed to submit proof: ${err.message}`);
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <div>
+            <h3>Submit AI Proof</h3>
+            <input
+                type="text"
+                placeholder="Metadata Hash (e.g., 0x...)"
+                value={metadataHashInput}
+                onChange={handleMetadataChange}
+                style={{ margin: '5px', padding: '8px', width: '300px' }}
+            />
+            <br />
+            <input
+                type="text"
+                placeholder="Output Hash (e.g., 0x...)"
+                value={outputHashInput}
+                onChange={handleOutputChange}
+                style={{ margin: '5px', padding: '8px', width: '300px' }}
+            />
+            <br />
+            <button onClick={handleSubmit} disabled={!account || submitting || !metadataHashInput || !outputHashInput}>
+                {submitting ? 'Submitting...' : 'Submit Proof'}
+            </button>
+            {submissionResult && <p style={{ color: 'green' }}>{submissionResult}</p>}
+            {error && <p style={{ color: 'red' }}>{error}</p>}
+        </div>
+    );
+}
+
+export default SubmitProof;
+Important Note on toBytes32: The ethers.utils.formatBytes32String function is used for creating a bytes32 string representation from a regular string. If your "hashes" are already proper hex strings (like 0x...), you might need ethers.utils.arrayify and then ethers.utils.hexlify to ensure they are passed correctly as bytes32 to the contract, especially if the original hash isn't exactly 32 bytes. The example above uses ethers.utils.isHexString and checks length, assuming the user might input a valid 64-character hex string.
+
+src/components/ClaimReward.jsx
+
+// frontend/src/components/ClaimReward.jsx
+import React, { useState, useEffect } from 'react';
+import { useWeb3 } from '../contexts/Web3Context';
+import { ethers } from 'ethers';
+
+function ClaimReward() {
+    const { account, contractInstances, error: web3Error } = useWeb3();
+    const [isEligible, setIsEligible] = useState(false);
+    const [hasClaimed, setHasClaimed] = useState(false);
+    const [rewardAmount, setRewardAmount] = useState('0');
+    const [claimLoading, setClaimLoading] = useState(false);
+    const [claimResult, setClaimResult] = useState(null);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+        const checkEligibilityAndClaimStatus = async () => {
+            if (!account || !contractInstances.proofOfAI || !contractInstances.rewarder || !contractInstances.qainToken) return;
+
+            setError(null);
+            try {
+                // Check eligibility from ProofOfAI
+                const eligible = await contractInstances.proofOfAI.isEligibleForReward(account);
+                setIsEligible(eligible);
+
+                // Check if already claimed
+                const claimed = await contractInstances.rewarder.hasClaimedReward(account);
+                setHasClaimed(claimed);
+
+                // Fetch reward amount (assuming it's fixed or you have a getter in Rewarder)
+                // For now, let's assume the fixed amount is 100 QAIN as in the contract.
+                // In a better version, Rewarder would have a `getRewardAmount()` function.
+                const decimals = await contractInstances.qainToken.decimals();
+                const fixedReward = ethers.utils.parseUnits("100", decimals); // Match contract's 100 tokens
+                setRewardAmount(ethers.utils.formatUnits(fixedReward, decimals));
+
+            } catch (err) {
+                console.error("Error checking claim status:", err);
+                setError("Failed to check reward status. Ensure contracts are correctly deployed.");
+            }
+        };
+
+        checkEligibilityAndClaimStatus();
+    }, [account, contractInstances, web3Error]);
+
+    const handleClaim = async () => {
+        if (!account || !contractInstances.rewarder) {
+            setError("Please connect your wallet.");
+            return;
+        }
+        if (!isEligible) {
+            setError("You are not eligible for rewards yet.");
+            return;
+        }
+        if (hasClaimed) {
+            setError("You have already claimed your reward.");
+            return;
+        }
+
+        setClaimLoading(true);
+        setError(null);
+        setClaimResult(null);
+
+        try {
+            const tx = await contractInstances.rewarder.claimReward();
+            setClaimResult("Claiming reward...");
+            const receipt = await tx.wait();
+            console.log("Claim reward receipt:", receipt);
+
+            if (receipt.status === 1) {
+                setClaimResult(`Reward claimed successfully! Check your balance.`);
+                setHasClaimed(true); // Update UI state
+            } else {
+                setError(`Reward claim failed. Transaction status: ${receipt.status}`);
+            }
+        } catch (err) {
+            console.error("Error claiming reward:", err);
+            setError(`Failed to claim reward: ${err.message}`);
+        } finally {
+            setClaimLoading(false);
+        }
+    };
+
+    return (
+        <div>
+            <h3>Claim Your Reward</h3>
+            {!account ? (
+                <p>Connect your wallet to claim rewards.</p>
+            ) : isEligible ? (
+                hasClaimed ? (
+                    <p>Reward already claimed.</p>
+                ) : (
+                    <>
+                        <p>You are eligible for a reward of {rewardAmount} QAIN.</p>
+                        <button onClick={handleClaim} disabled={claimLoading}>
+                            {claimLoading ? 'Claiming...' : 'Claim Reward'}
+                        </button>
+                    </>
+                )
+            ) : (
+                <p>Submit a valid AI proof to become eligible for rewards.</p>
+            )}
+            {claimResult && <p style={{ color: 'green' }}>{claimResult}</p>}
+            {error && <p style={{ color: 'red' }}>{error}</p>}
+        </div>
+    );
+}
+
+export default ClaimReward;
+Step 6: Update src/App.jsx
+
+This is the main application component where we'll render the other components.
+
+// frontend/src/App.jsx
+import React from 'react';
+import WalletConnector from './components/WalletConnector';
+import QainBalance from './components/QainBalance';
+import SubmitProof from './components/SubmitProof';
+import ClaimReward from './components/ClaimReward';
+import { useWeb3 } from './contexts/Web3Context'; // Import the hook
+
+function App() {
+    const { account } = useWeb3(); // Use the hook to get context
+
+    return (
+        <div className="App" style={{ padding: '20px', fontFamily: 'sans-serif' }}>
+            <h1>QAIN - Quantum + AI + Blockchain Integration</h1>
+
+            <div style={{ marginBottom: '20px' }}>
+                <WalletConnector />
+            </div>
+
+            {account && ( // Only show these components if wallet is connected
+                <>
+                    <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px' }}>
+                        <h2>Your QAIN Details</h2>
+                        <QainBalance />
+                    </div>
+
+                    <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px' }}>
+                        <SubmitProof />
+                    </div>
+
+                    <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px' }}>
+                        <ClaimReward />
+                    </div>
+
+                    {/* You can add more components here, e.g., to view quantum oracle data */}
+                    {/* <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px' }}>
+                        <h3>Quantum Oracle Data</h3>
+                        <QuantumOracleStatus />
+                    </div> */}
+                </>
+            )}
+        </div>
+    );
+}
+
+export default App;
+Step 7: Run the Frontend Development Server
+
+Make sure you are in the frontend directory and your virtual environment (if used for Python) is inactive for this step.
+
+# In the frontend directory
+npm run dev
+This will start the Vite development server, typically at http://localhost:5173/ (or a similar port). Open this URL in your browser.
+
+Testing the Frontend:
+
+Connect Wallet: Click "Connect Wallet" and grant access to your MetaMask account. Ensure MetaMask is set to the Sepolia testnet.
+Check Balance: Your QAIN token balance should appear.
+Submit Proof:
+You'll need to generate example metadataHash and outputHash values. You can use online tools or write a small script to generate SHA256 hashes and then format them as 32-byte values (64 hex chars) if needed. For testing, you can use placeholder hex strings.
+Enter these hashes and click "Submit Proof".
+Approve the transaction in MetaMask.
+You should see a confirmation message.
+Claim Reward:
+Important: For you to be eligible, the verifyProof function in your ProofOfAI.sol contract needs to be called with the proofId of your submitted proof. This is currently done by the owner (you) manually or via the Chainlink adapter if you set that up.
+If you manually call verifyProof (using npx hardhat run scripts/verify_proof.js --network sepolia proofId <id>) or your Chainlink job has successfully executed verifyProof, you should then be able to claim a reward.
+Click "Claim Reward" and approve the transaction in MetaMask.
+Your balance should update, and the UI should indicate you've claimed.
+Next Steps for Phase 4:
+
+More Components: Add components for displaying submitted proofs, their verification status, and reward claim history.
+Quantum Oracle Display: Add a component to fetch and display the latestRandomNumber from your QuantumOracle.sol contract.
+Improved UI/UX: Enhance the styling and user experience.
+Error Handling: Implement more robust error handling and user feedback.
+Asynchronous Operations: Use loading states and error messages appropriately for all contract interactions.
+This completes our initial setup for the React frontend! You've now got the core pieces interacting.
